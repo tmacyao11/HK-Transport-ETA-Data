@@ -1,0 +1,107 @@
+name: Refresh route data
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "10 9,21 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: route-data-refresh
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: crawling/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r crawling/requirements.txt
+
+      - name: Fetch and build route data
+        env:
+          REQUEST_LIMIT: "6"
+        run: |
+          set -euo pipefail
+          python crawling/parseHoliday.py
+          python crawling/ctb.py
+          python crawling/kmb.py
+          python crawling/nlb.py
+          python crawling/lrtfeeder.py
+          python crawling/lightRail.py
+          python crawling/mtr.py
+          python crawling/parseJourneyTime.py
+          python crawling/parseGtfs.py
+          python crawling/parseGtfsEn.py
+          python crawling/gmb.py
+          python crawling/sunferry.py
+          python crawling/fortuneferry.py
+          python crawling/hkkf.py
+          python crawling/matchGtfs.py
+          python crawling/cleansing.py
+          python crawling/mergeRoutes.py
+          python crawling/mergeStopList.py
+          python crawling/routeCompare.py
+          python crawling/mtrExits.py
+
+      - name: Validate output and create checksum
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          output = Path("routeFareList.min.json")
+          data = json.loads(output.read_text(encoding="utf-8"))
+          required = {"routeList", "stopList", "stopMap", "holidays", "serviceDayMap"}
+          missing = required.difference(data)
+          if missing:
+              raise SystemExit(f"Generated route database is missing: {sorted(missing)}")
+          if not data["routeList"] or not data["stopList"]:
+              raise SystemExit("Generated route database is empty")
+          PY
+          md5sum routeFareList.min.json | cut -d ' ' -f 1 | tr -d '\n' > routeFareList.md5
+
+      - name: Keep a diagnostic artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: route-database
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            routeFareList.min.json
+            routeFareList.md5
+
+      - name: Publish the app database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          route_publish_dir="$(mktemp -d)"
+          cp routeFareList.min.json routeFareList.md5 "${route_publish_dir}/"
+          touch "${route_publish_dir}/.nojekyll"
+          cd "${route_publish_dir}"
+          git init -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Refresh route data from run ${GITHUB_RUN_NUMBER}"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin gh-pages
