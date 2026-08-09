@@ -7,7 +7,7 @@ import json
 from pyproj import Transformer
 import logging
 import httpx
-from typing import List
+from pathlib import Path
 
 from crawl_utils import emitRequest
 
@@ -51,22 +51,19 @@ async def getRouteStop(co='lightRail'):
   stopList = {}
   routeCollection = set()
 
-  csv_urls = [
-      'https://opendata.mtr.com.hk/data/light_rail_routes_and_stops.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/506P*.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/507P*.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/720*.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/751*.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/751P.csv',
-      'https://notice.hkbus.app/handmade_data/lightRail/SPR.csv'
+  csv_sources = [
+      ('https://opendata.mtr.com.hk/data/light_rail_routes_and_stops.csv', True),
+      *((str(csv_path), False) for csv_path in sorted(
+          (Path(__file__).parent / 'data' / 'lightRail').glob('*.csv')))
   ]
 
-  for url in csv_urls:
+  for source, is_remote in csv_sources:
     try:
-      text = await fetch_csv_text(url, a_client)
+      text = await fetch_csv_text(source, a_client) if is_remote else Path(
+          source).read_text(encoding='utf-8')
     except Exception:
       logging.getLogger(__name__).warning(
-          "Skipping CSV source after repeated failures: %s", url)
+          "Skipping CSV source after repeated failures: %s", source)
       continue
 
     reader = csv.reader(text.splitlines())

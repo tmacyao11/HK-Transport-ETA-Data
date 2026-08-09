@@ -58,7 +58,6 @@ jobs:
           python crawling/cleansing.py
           python crawling/mergeRoutes.py
           python crawling/mergeStopList.py
-          python crawling/routeCompare.py
           python crawling/mtrExits.py
 
       - name: Validate output and create checksum
