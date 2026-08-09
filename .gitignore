@@ -4,6 +4,7 @@
 gtfs.zip
 gtfs
 *csv
+!crawling/data/lightRail/*.csv
 __pycache__
 dist
 build
