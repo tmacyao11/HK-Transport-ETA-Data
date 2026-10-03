@@ -3,32 +3,88 @@ import httpx
 import asyncio
 import logging
 import os
+import random
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 logger = logging.getLogger(__name__)
 
 
-async def emitRequest(url: str, client: httpx.AsyncClient, headers={}):
-  RETRY_TIMEOUT_MAX = 300
-  retry_timeout = 1
-  # retry if "Too many request (429)"
-  while True:
+class RequestLimiter:
+  """Limit every HTTP attempt, including nested requests and retries."""
+
+  def __init__(self, limit=2, interval=0.5):
+    if limit < 1 or interval < 0:
+      raise ValueError("Request limit must be positive and interval non-negative")
+    self._slots = asyncio.Semaphore(limit)
+    self._lock = asyncio.Lock()
+    self._interval = interval
+    self._next_request = 0
+
+  def defer(self, seconds):
+    self._next_request = max(
+        self._next_request, asyncio.get_running_loop().time() + seconds)
+
+  async def get(self, client, url, headers):
+    async with self._slots:
+      async with self._lock:
+        loop = asyncio.get_running_loop()
+        # Another in-flight request can extend the shared cooldown while waiting.
+        while (delay := self._next_request - loop.time()) > 0:
+          await asyncio.sleep(delay)
+        self._next_request = loop.time() + self._interval
+      return await client.get(url, headers=headers)
+
+
+def retry_after_seconds(value):
+  if not value:
+    return 0
+  try:
+    return max(0, float(value))
+  except ValueError:
     try:
-      r = await client.get(url, headers=headers)
+      date = parsedate_to_datetime(value)
+      if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+      return max(0, (date - datetime.now(timezone.utc)).total_seconds())
+    except (ValueError, TypeError, OverflowError):
+      return 0
+
+
+async def emitRequest(url: str, client: httpx.AsyncClient, headers=None,
+                      *, limiter=None, max_attempts=10):
+  if max_attempts < 1:
+    raise ValueError("max_attempts must be positive")
+  for attempt in range(1, max_attempts + 1):
+    retry_after = 0
+    throttled = False
+    try:
+      if limiter is None:
+        r = await client.get(url, headers=headers)
+      else:
+        r = await limiter.get(client, url, headers)
       if r.status_code == 200:
         return r
-      elif r.status_code in (429, 502, 504, 403):
-        logger.warning(
-            f"status_code={r.status_code}, wait {retry_timeout} and retry. URL={url}")
-        await asyncio.sleep(retry_timeout)
-        retry_timeout = min(retry_timeout * 2, RETRY_TIMEOUT_MAX)
-      else:
+      if r.status_code not in (403, 408, 429, 500, 502, 503, 504):
         r.raise_for_status()
-        raise Exception(r.status_code, url)
-    except (httpx.PoolTimeout, httpx.ReadTimeout, httpx.ReadError) as e:
-      logger.warning(
-          f"Exception {repr(e)} occurred, wait {retry_timeout} and retry. URL={url}")
-      await asyncio.sleep(retry_timeout)
-      retry_timeout = min(retry_timeout * 2, RETRY_TIMEOUT_MAX)
+        raise RuntimeError(f"Unexpected status_code={r.status_code}. URL={url}")
+      error = httpx.HTTPStatusError(
+          f"status_code={r.status_code}", request=r.request, response=r)
+      retry_after = retry_after_seconds(r.headers.get('Retry-After'))
+      throttled = r.status_code in (403, 429)
+    except (httpx.TimeoutException, httpx.NetworkError,
+            httpx.RemoteProtocolError) as exc:
+      error = exc
+    if attempt == max_attempts:
+      raise RuntimeError(
+          f"Request failed after {max_attempts} attempts. URL={url}") from error
+    backoff = min(2 ** (attempt - 1), 120)
+    delay = max(backoff + random.uniform(0, backoff * 0.25), retry_after)
+    if limiter is not None and throttled:
+      limiter.defer(delay)
+    logger.warning(
+        f"{error!r}, attempt {attempt}/{max_attempts}, wait {delay:.1f}s and retry. URL={url}")
+    await asyncio.sleep(delay)
 
 
 def get_request_limit():

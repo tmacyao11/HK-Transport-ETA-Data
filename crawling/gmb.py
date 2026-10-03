@@ -5,14 +5,20 @@ import json
 import logging
 import time
 import httpx
+import os
 
-from crawl_utils import emitRequest, get_request_limit
+from crawl_utils import emitRequest, get_request_limit, RequestLimiter
 
 logger = logging.getLogger(__name__)
 
 
-async def getRouteStop(co):
-  a_client = httpx.AsyncClient()
+async def getRouteStop(co, a_client):
+  request_limiter = RequestLimiter(
+      int(os.environ.get('GMB_REQUEST_LIMIT', '2')),
+      float(os.environ.get('GMB_REQUEST_INTERVAL', '0.5')))
+
+  async def request(url):
+    return await emitRequest(url, a_client, limiter=request_limiter)
   # parse gtfs service_id
   serviceIdMap = {}
   with open('gtfs/calendar.txt', 'r', encoding="utf-8") as csvfile:
@@ -56,7 +62,7 @@ async def getRouteStop(co):
   async def get_route_directions(route, route_no):
     service_type = 2
     for direction in route['directions']:
-      rs = await emitRequest('https://data.etagmb.gov.hk/route-stop/' + str(route['route_id']) + '/' + str(direction['route_seq']), a_client)
+      rs = await request('https://data.etagmb.gov.hk/route-stop/' + str(route['route_id']) + '/' + str(direction['route_seq']))
       for stop in rs.json()['data']['route_stops']:
         stop_id = stop['stop_id']
 
@@ -145,7 +151,7 @@ async def getRouteStop(co):
 
   async def get_route(region: str, route_no):
     async with req_route_limit:
-      r = await emitRequest('https://data.etagmb.gov.hk/route/' + region + '/' + route_no, a_client)
+      r = await request('https://data.etagmb.gov.hk/route/' + region + '/' + route_no)
       await asyncio.gather(*[get_route_directions(route, route_no) for route in r.json()['data']])
     routeList.sort(key=lambda a: a['gtfsId'])
 
@@ -153,7 +159,7 @@ async def getRouteStop(co):
 
   async def get_routes_region(region: str):
     async with req_route_region_limit:
-      r = await emitRequest('https://data.etagmb.gov.hk/route/' + region, a_client)
+      r = await request('https://data.etagmb.gov.hk/route/' + region)
       await asyncio.gather(*[get_route(region, route) for route in r.json()['data']['routes']])
 
   await asyncio.gather(*[get_routes_region(r) for r in ['HKI', 'KLN', "NT"]])
@@ -171,7 +177,7 @@ async def getRouteStop(co):
     if stop_id not in gtfsStops:
       logger.info(f"Getting stop {stop_id} from etagmb")
       async with req_stops_limit:
-        r = await emitRequest('https://data.etagmb.gov.hk/stop/' + str(stop_id), a_client)
+        r = await request('https://data.etagmb.gov.hk/stop/' + str(stop_id))
         stops[stop_id]['lat'] = r.json(
         )['data']['coordinates']['wgs84']['latitude']
         stops[stop_id]['long'] = r.json(
@@ -199,7 +205,12 @@ async def getRouteStop(co):
       raise TypeError
     json.dump(stopCandidates, f, ensure_ascii=False, default=set_default)
 
+async def main():
+  async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, pool=None)) as a_client:
+    await getRouteStop('gmb', a_client)
+
+
 if __name__ == '__main__':
   logging.basicConfig(level=logging.INFO)
   logging.getLogger('httpx').setLevel(logging.WARNING)
-  asyncio.run(getRouteStop('gmb'))
+  asyncio.run(main())

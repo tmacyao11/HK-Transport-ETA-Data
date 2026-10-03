@@ -35,9 +35,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r crawling/requirements.txt
 
+      - name: Test crawler request handling
+        run: python -m unittest discover -s tests -v
+
       - name: Fetch and build route data
         env:
           REQUEST_LIMIT: "6"
+          GMB_REQUEST_LIMIT: "2"
+          GMB_REQUEST_INTERVAL: "0.5"
         run: |
           set -euo pipefail
           python crawling/parseHoliday.py
